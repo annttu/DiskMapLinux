@@ -1,21 +1,21 @@
-# DiskMap
+# DiskMapLinux
 
-OpenSolaris/OpenIndiana utility to manage drive and map wmn device name (c1txxx) to real drive using lsi sas controller — Read more
-
-This script will hopefully make your life easier if you use ZFS on OpenSolaris/OpenIndiana with LSI controllers and some kind of backplane.
+DiskMapLinux is a fork of DiskMap (https://github.com/eNiXHosting/DiskMap) that simplifies management of disks connected to LSI SAS controllers on Linux hosts using the sas2ircu binary. DiskMap is a OpenSolaris/OpenIndiana utility to manage drive and map wmn device name (c1txxx) to real drive using lsi sas controller — Read more
 
 It can:
 
 * list connected drives, and see the mapping between wmn device name (c1txxx) and their physical location (controller, enclosure, slot);
+
+It will be able to:
+
 * turn the error led of a drive on and off (for easy identification of the drive in large enclosures with many disks);
 * be used as a pipe to enhance the output of programs like `iostat` to annotate disk information with the location of each disk.
 
-It's a work in progress. It works for me, but I don't have the time to polish or clean it up; so if you want to add your favourite feature or fix some nasty bug, feel free to contribute.
+This fork is a work in progress.
 
 # Requirements
 
 You have to get the sas2ircu tool. Install it in /usr/sbin, or edit the path in the file).
-An outdated revision is available [here](http://www.supermicro.com/support/faqs/data_lib/FAQ_9633_SAS2IRCU_Phase_5.0-5.00.00.00.zip).
 
 There is some work in progress for smartmontools support.
 
@@ -40,10 +40,8 @@ It will populate a cache, which will in turn be used by other commands.
 Example:
 
 	Diskmap - berilia> discover
-	Warning : Got the serial 5629293 from prtconf, but can't find it in disk detected by sas2ircu (disk removed/not on backplane ?)
-	Warning : Got the serial 5629293 from prtconf, but can't find it in disk detected by sas2ircu (disk removed/not on backplane ?)
-	Warning : Got the disk /dev/rdsk/c3t0d0 from zpool status, but can't find it in disk detected by sas2ircu (disk removed ?)
-	Warning : Got the disk /dev/rdsk/c3t1d0 from zpool status, but can't find it in disk detected by sas2ircu (disk removed ?)
+	Warning : Got the serial 5629293 from lshw, but can't find it in disk detected by sas2ircu (disk removed/not on backplane ?)
+	Warning : Got the serial 5629293 from lshw, but can't find it in disk detected by sas2ircu (disk removed/not on backplane ?)
 
 ## `disks`
 

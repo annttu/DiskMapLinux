@@ -2,6 +2,7 @@
 #-*- coding: utf-8 -*- 
 #
 #
+# Linux compatibility code copyright (C) 2015 Gerben Meijer
 # Copyright (C) 2011 Sébastien Wacquiez
 #
 # This program is free software: you can redistribute it and/or modify
@@ -20,22 +21,23 @@
                                                 
 
 
-VERSION="0.12b"
+VERSION="0.1"
 
 import subprocess, re, os, sys, readline, cmd, pickle, glob
 from pprint import pformat, pprint
 pj = os.path.join
 
+from lxml import etree
+from lxml import objectify 
+
 from socket import gethostname
 hostname = gethostname()
 
-cachefile = "/tmp/pouet"
+cachefile = "/tmp/.diskmaplinux.cache"
 
-sas2ircu = "/usr/sbin/sas2ircu"
-prtconf = "/usr/sbin/prtconf"
-zpool = "/usr/sbin/zpool"
-smartctl = "/usr/local/sbin/smartctl"
-mdb = "/usr/bin/mdb"
+sas2ircu = "/usr/local/sbin/sas2ircu"
+smartctl = "/usr/sbin/smartctl"
+lshw = "/usr/bin/lshw"
 
 def run(cmd, args, tosend=""):
     if not isinstance(args, list):
@@ -88,7 +90,7 @@ class SesManager(cmd.Cmd):
 
     @property
     def disks(self):
-        return dict([ (k, v) for k, v in self._disks.items() if k.startswith("/dev/rdsk/") ])
+        return dict([ (k, v) for k, v in self._disks.items() if k.startswith("/dev/") ])
 
     @property
     def enclosures(self):
@@ -166,91 +168,41 @@ class SesManager(cmd.Cmd):
                 if m["serial"] in self._disks:
                     self._disks[m["serial"]]["path"].extend(m["path"])
                     self._disks[m["serial"]]["controller"].extend(m["controller"])
+		    print("sas2ircu adding disk with serial %s to existing object"%(m["serial"]))
                 else: # else save it
                     self._disks[m["serial"]] = m
+		    print("sas2ircu adding new disk with serial %s on ctrl %s enclosure path %s"%(m["serial"], m["controller"], m["path"]))
 
-    def discover_mapping(self, fromstring=None):
-        """
-        Use prtconf to get real device name using disk serial.
-        We should be able to use guid instead, but for some reason it's not reported
-        in standard way on the server I've access to.
 
+    def discover_mapping(self, lshwoutput=None):
+        """,
+        Use lshw -C disk get real device names and other OS properties using disk serial.
         """
-        if not fromstring:
-            fromstring = run(prtconf, "-v")
-        # Do some ugly magic to get what we want
-        # First, get one line per drive
-        tmp = fromstring.replace("\n", "").replace("disk, instance", "\n")
-        # Then match with regex
-        tmp = re.findall("name='inquiry-serial-no' type=string items=1 dev=none +value='([^']+)'"
-                         ".*?"
-                         #"name='client-guid' type=string items=1 *value='([^']+)'"
-                         #".*?"
-                         "dev_link=(/dev/rdsk/c[^ ]*d0)s0", tmp)
-        for serial, device in tmp:
+        if not lshwoutput:
+            lshwoutput = run(lshw, ["-C", "disk", "-xml", "-quiet"])
+	lshwdata = objectify.fromstring(lshwoutput)
+        for lshwdisk in lshwdata.iter('node'):
+            # lshw uses 'logicalname' as the /dev/ device node
+            device = str(lshwdisk["logicalname"].text)
             # We use a upped serial.
-            serial = serial.strip().upper()
-            # Sometimes serial returned by prtconf and by sas2ircu are different.
-            if serial not in self._disks:
-                # First, try to mangle them (observed on WD disk)
-                if serial.replace("-", "") in self._disks:
-                    serial = serial.replace("-", "")
-                # Then try to use just 8 first char (observed on Seagate Drive)
-                elif serial[:8] in self._disks:
-                    serial = serial[:8]
-                # Then try to use just 8 last char (observed on some other WD disk)
-                elif serial[-8:] in self._disks:
-                    serial = serial[-8:]
-            if serial in self._disks:
-                # Add device name to disks
+            if lshwdisk["serial"].text:
+              serial = str(lshwdisk["serial"].text).strip().upper()
+              if serial in self._disks:
+                # Add logicalname name to disks
                 if "device" in self._disks[serial]:
                     print "Warning ! We have 2 device for disk %s : %s and %s"%(serial, self._disks[serial]["device"], device)
                     print "Check your mutlipath settings (stmsboot -e and scsi-vhci-failover-override in /kernel/drv/scsi_vhci.conf"
                 self._disks[serial]["device"] = device
+		print("lshw map device %s to serial %s"%(device, serial))
                 # Add a reverse lookup
-                self._disks[device] = self._disks[serial]
+                #self._disks[device] = self._disks[serial]
+		#print("lshw reverse lookup %s to %s"%(self._disks[device], self._disks[serial]))
+              else:
+                print "Warning : Got the serial %s from lshw, but can't find it in disk detected by sas2ircu (disk removed/not on backplane ?)"%serial
             else:
-                print "Warning : Got the serial %s from prtconf, but can't find it in disk detected by sas2ircu (disk removed/not on backplane ?)"%serial
+              print "Warning : No serial for %s from lshw)"%device
+  
 
-    def discover_zpool(self, fromstring=None):
-        """ Try to locate disk in current zpool configuration"""
-        if not fromstring:
-            fromstring = run(zpool, "status")
-        pools = fromstring.split("pool:")
-        for pool in pools:
-            if not pool.strip(): continue
-            for m in re.finditer(" (?P<pool>[^\n]+)\n *" # We've splitted on pool:, so our first word is the pool name
-                                 "state: (?P<state>[^ ]+)\n *"
-                                 "(status: (?P<status>(.|\n)+)\n *)??"
-                                 "scan: (?P<scan>(.|\n)*)\n *"
-                                 "config: ?(?P<config>(.|\n)*)\n *"
-                                 "errors: (?P<errors>[^\n]*)"
-                                 ,pool):
-                m = m.groupdict()
-                parent = "stripped"
-                for disk in re.finditer("(?P<indent>[ \t]+)(?P<name>[^ \t\n]+)( +(?P<state>[^ \t\n]+) +)?("
-                                        "(?P<read>[^ \t\n]+) +(?P<write>[^ \t\n]+) +"
-                                        "(?P<cksum>[^\n]+))?(?P<notes>[^\n]+)?\n", m["config"]):
-                    disk = disk.groupdict()
-                    if not disk["name"] or disk["name"] in ("NAME", m["pool"]):
-                        continue
-                    if disk["name"][-4:-2] == "d0":
-                        disk["name"] = disk["name"][:-2]
-                    if (disk["name"].startswith("mirror") or
-                        disk["name"].startswith("log") or
-                        disk["name"].startswith("raid") or
-                        disk["name"].startswith("spare") or
-                        disk["name"].startswith("cache")):
-                        parent = disk["name"].strip()
-                        continue
-                    if "/dev/rdsk" not in disk["name"]:
-                        disk["name"] = "/dev/rdsk/%s"%disk["name"]
-                    if disk["name"] not in self._disks:
-                        print "Warning : Got the disk %s from zpool status, but can't find it in disk detected by sas2ircu (disk removed ?)"%disk["name"]
-                        continue
-                    self._disks[disk["name"]]["zpool"] = self._disks[disk["name"]].get("zpool", {})
-                    self._disks[disk["name"]]["zpool"][m["pool"]] = parent
-        
     def set_leds(self, disks, value=True):
         if isinstance(disks, dict):
             disks = disks.values()
@@ -295,7 +247,7 @@ class SesManager(cmd.Cmd):
             # We wan't to load data from an other box for testing purposes
             # So we don't want to catch any exception
             files = os.listdir(configdir)
-            for f in ("prtconf-v.txt", "sas2ircu-0-display.txt", "sas2ircu-list.txt", "zpool-status.txt"):
+            for f in ("sas2ircu-0-display.txt", "sas2ircu-list.txt"):
                 if f not in files:
                     print "Invalid confdir, lacking of %s"%f
                     return
@@ -306,17 +258,15 @@ class SesManager(cmd.Cmd):
                 ctrlid = long(os.path.basename(name).split("-")[1])
                 tmp[ctrlid] = file(name).read()
             self.discover_enclosures(tmp)
-            self.discover_mapping(file(pj(configdir, "prtconf-v.txt")).read())
-            self.discover_zpool(file(pj(configdir, "zpool-status.txt")).read())
+            self.discover_mapping(file(pj(configdir, "lshw-Cdisk-xml.txt")).read())
         else:
-            for a in ( "discover_controllers", "discover_enclosures",
-                   "discover_mapping", "discover_zpool" ):
-                try:
+            for a in ( "discover_controllers", "discover_enclosures", "discover_mapping"):
+                #try:
                     getattr(self, a)()
-                except Exception, e:
-                    print "Got an error during %s discovery : %s"%(a,e)
-                    print "Please run %s configdump and send the report to dev"%sys.argv[0]
-                    break
+                #except Exception, e:
+                #    print "Got an error during %s discovery : %s"%(a,e)
+                #    print "Please run %s configdump and send the report to dev"%sys.argv[0]
+                #    break
         self.do_save()
     do_refresh = do_discover
 
@@ -341,7 +291,7 @@ class SesManager(cmd.Cmd):
     def do_disks(self, line):
         """Display detected disks. Use -v for verbose output"""
         list = [ (",".join(v["path"]), v)
-                 for k,v in self.disks.items() ]
+                 for k,v in self._disks.items() ]
         list.sort()
         if line == "-v":
             pprint (list)
@@ -349,12 +299,11 @@ class SesManager(cmd.Cmd):
         totalsize = 0
         for path, disk in list:
             disk["cpath"] = path
-            disk["device"] = disk["device"].replace("/dev/rdsk/", "")
+            disk["device"] = disk["device"].replace("/dev/", "")
             disk["readablesize"] = megabyze(disk["sizemb"]*1024*1024)
-            disk["pzpool"] = " / ".join([ "%s: %s"%(k,v) for k,v in disk.get("zpool", {}).items() ])
             disk["alias"] = self.aliases.get(disk["enclosure"], disk["enclosure"]) + "/%02d"%disk["slot"]
             totalsize += disk["sizemb"]*1024*1024
-            print "{cpath}  {alias:<16} {device:<21}  {model:<16}  {readablesize:<6} {pzpool}".format(**disk)
+            print "{cpath}  {alias:<16} {device:<21}  {model:<16}  {readablesize:<6}".format(**disk)
         print "Drives : %s   Total Capacity : %s"%(len(self.disks), megabyze(totalsize))
 
     def smartctl(self, disks, action="status"):
@@ -367,7 +316,7 @@ class SesManager(cmd.Cmd):
         result = []
         progress = xrange(1,len(disks)+1, 1).__iter__()
         for disk in disks:
-            print "\rExecuting smartcl on %s : %3d/%d"%(disk["device"].replace("/dev/rdsk/",""),
+            print "\rExecuting smartcl on %s : %3d/%d"%(disk["device"].replace("/dev/",""),
                                                      progress.next(),len(disks)),
             smartparams = params + [ disk["device"]+"p0" ]
             result.append(run(smartctl, smartparams))
@@ -385,7 +334,7 @@ class SesManager(cmd.Cmd):
                 self._disks[disk["device"]]["smartoutput"] = smartoutput
                 smartoutput = re.sub("\n[ \t]+", " ", smartoutput)
                 if "test failed" in smartoutput:
-                    print "  Disk %s fail his last test"%disk["device"].replace("/dev/rdsk/", "")
+                    print "  Disk %s fail his last test"%disk["device"].replace("/dev/", "")
                 zob= re.findall("(Self-test execution status.*)", smartoutput)
             except KeyError:
                 pass
@@ -419,7 +368,7 @@ class SesManager(cmd.Cmd):
             return None
 
     def get_disk(self, line):
-        for t in (line, "/dev/rdsk/%s"%line, line.upper(), line.lower()):
+        for t in (line, "/dev/%s"%line, line.upper(), line.lower()):
             tmp = self._disks.get(t, None)
             if tmp:
                 return [ tmp ]
@@ -450,58 +399,7 @@ class SesManager(cmd.Cmd):
             result.extend(self.enclosures.keys())
             result.extend([ "%(controller)s:%(index)s"%e for e in self.enclosures.values() ])
             result.extend(self.aliases.values())
-        else:
-            result = [ "mirror", "raidz1", "raidz2", "raidz3" ]
         return [ i for i in result if i.startswith(text) ]
-
-    def do_enumerate(self, line):
-        """
-        Enumerate disks sequentially to help zpool creation.
-
-        Eg :
-        2 way mirror on 1 enclosures :
-        enumerate mirror backplane1 backplane1
-        mirror disk1_backplane1 disk2_backplane1 mirror disk3_backplane1 disk4_backplane1 [...]
-        
-        2 way mirror on 2 enclosures :
-        enumerate mirror [backplane1] [backplane2]
-        output :
-        mirror disk1_backplane1 disks1_backplane2 mirror disk2_backplane1 disk2_backplane2 [...]
-
-        enumerate raidz2 b1 b2 b1 b2 :
-        raidz2 d1_b1 d1_b2 d2_b1 d2_b2 raidz2 d3_b1 d3_b2 d4_b1 d4_b2 [...]
-        """
-        line = line.strip()
-        if not line: return
-        line = line.split()
-        text = line.pop(0)
-        # Get enclosure id for each parameters
-        enclosures = [ self.get_enclosure(i) for i in line ]
-        # Then build a list of drives for each enclosure
-        disks = {}
-        for enclosure in enclosures:
-            disks[enclosure] = [ disk for disk in self.disks.values() if disk["enclosure"] == enclosure ]
-            # And sort it per drive index
-            disks[enclosure].sort(key=lambda a: a["slot"])
-        # Now, iterate on each enclosures we get a print the drive device name
-        debug = []
-        result = []
-        while True:
-            # Use a temporary list so we don't print partial calculation
-            tmp = [ text ]
-            debug.append(text)
-            try:
-                for enclosure in enclosures:
-                    # Get next disk
-                    disk = disks[enclosure].pop(0)
-                    # Add what we need
-                    tmp.append(disk["device"].replace("/dev/rdsk/",""))
-                    debug.append(disk["path"][0])
-            except IndexError:
-                    break
-            result.extend(tmp)
-        print "Debug with drive path : " + " ".join(debug)
-        print "C/C this in your zpool create cmd line : " + " ".join(result)        
 
     def do_configdump(self, path):
         if not path:
@@ -514,10 +412,6 @@ class SesManager(cmd.Cmd):
         for ctrl in self.controllers:
             file(pj(path, "sas2ircu-%s-display.txt"%ctrl), "w").write(
                 run(sas2ircu, [ctrl, "DISPLAY"]))
-        file(pj(path, "prtconf-v.txt"), "w").write(
-            run(prtconf, "-v"))
-        file(pj(path, "zpool-status.txt"), "w").write(
-            run(zpool, "status"))
         print "Dumped all value to path %s"%path
 
     def ledparse(self, value, line):
@@ -545,7 +439,7 @@ class SesManager(cmd.Cmd):
     def complete_ledon(self, text, line, begidx, endidx):
         candidates = [ "all", "ALL" ]
         candidates.extend(self.aliases.values())
-        candidates.extend([ disk["device"].replace("/dev/rdsk/", "") for disk in self.disks.values() ])
+        candidates.extend([ disk["device"].replace("/dev/", "") for disk in self.disks.values() ])
         candidates.extend([ disk["serial"] for disk in self.disks.values() ])
         candidates.extend([ "%s:%s:%s"%(ctrl, disk["enclosureindex"], disk["slot"])
                             for disk in self.disks.values() for ctrl in disk["controller"] ])
@@ -615,7 +509,7 @@ class SesManager(cmd.Cmd):
         for enclosure, alias in self.aliases.items():
             for disk in self.disks.values():
                 if disk["enclosure"] == enclosure:
-                    tmp = disk["device"].replace("/dev/rdsk/", "")
+                    tmp = disk["device"].replace("/dev/", "")
                     replacelist.append((tmp, "%s/%s%02d"%(tmp, alias, disk["slot"])))
         line = sys.stdin.readline()
         while line:
@@ -674,7 +568,6 @@ class SesManager(cmd.Cmd):
             result.append(pformat(getattr(self,i)))
             result.append("")
         return "\n".join(result)
-
 
 import unittest
 class TestConfigs(unittest.TestCase):

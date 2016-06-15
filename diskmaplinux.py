@@ -35,9 +35,9 @@ hostname = gethostname()
 
 cachefile = "/tmp/.diskmaplinux.cache"
 
-sas2ircu = "/usr/local/sbin/sas2ircu"
+sas2ircu = "/usr/local/bin/sas2ircu"
 smartctl = "/usr/sbin/smartctl"
-lshw = "/usr/bin/lshw"
+lshw = "/sbin/lshw"
 
 def run(cmd, args, tosend=""):
     if not isinstance(args, list):
@@ -186,7 +186,7 @@ class SesManager(cmd.Cmd):
             device = str(lshwdisk["logicalname"].text)
             # We use a upped serial.
             if lshwdisk["serial"].text:
-              serial = str(lshwdisk["serial"].text).strip().upper()
+              serial = str(lshwdisk["serial"].text).strip().upper().replace('-', '')
               if serial in self._disks:
                 # Add logicalname name to disks
                 if "device" in self._disks[serial]:
@@ -298,6 +298,8 @@ class SesManager(cmd.Cmd):
             return
         totalsize = 0
         for path, disk in list:
+            if 'device' not in disk:
+                disk['device'] = '/dev/nonexistent'
             disk["cpath"] = path
             disk["device"] = disk["device"].replace("/dev/", "")
             disk["readablesize"] = megabyze(disk["sizemb"]*1024*1024)
